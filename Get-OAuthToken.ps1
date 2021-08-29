@@ -140,6 +140,10 @@ function Get-CachedToken {
 			if ($configExists) {
 				$content = (Get-Content $ConfigPath | ConvertFrom-Json)
 
+				if (!$content.tokenData) {
+					return $null
+				}
+
 				$now = Get-Date -AsUTC
 				$expires = (Get-Date $content.tokenData.expires)
 				if ($now -ge $expires) {
