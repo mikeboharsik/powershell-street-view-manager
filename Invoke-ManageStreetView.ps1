@@ -229,9 +229,99 @@ function Get-ExistingUploadRef {
 	return $existingUploadRef
 }
 
+function Validate-PhotoAttributes {
+	[CmdletBinding()]
+	Param([string] $PhotoPath)
+
+	$exifTags = @{
+		CreateDate = @{}
+		CroppedAreaImageHeightPixels = @{ Required = $true }
+		CroppedAreaImageWidthPixels = @{ Required = $true }
+		CroppedAreaLeftPixels = @{ DefaultVal = 0; Required = $true	}
+		CroppedAreaTopPixels = @{	DefaultVal = 0; Required = $true }
+		DateTimeOriginal = @{ SameValueAs = @( "CreateDate" ); Required = $true } # Google seems to assume that this is local time and auto-converts to UTC on upload
+		FirstPhotoDate = @{ SameValueAs = @( "DateTimeOriginal", "CreateDate" ) }
+		FullPanoHeightPixels = @{ Required = $true }
+		FullPanoWidthPixels = @{ Required = $true }
+		GPSLatitude = @{}
+		GPSLongitude = @{}
+		LastPhotoDate = @{ SameValueAs = @( "DateTimeOriginal", "CreateDate" ) }
+		PoseHeadingDegrees = @{	DefaultVal = 0; Required = $true }
+		ProjectionType = @{ DefaultVal = "equirectangular"; Required = $true }
+		StitchingSoftware = @{}
+	}
+
+	[string[]] $relevantExifTags = $exifTags.Keys
+	[string[]] $requiredExifTags = $exifTags.Keys | Where-Object { $exifTags[$_].Required -eq $true }
+
+	Write-Verbose "Required EXIF tags = $($requiredExifTags -Join ', ')"
+
+	$exiftoolArgs = $relevantExifTags | ForEach-Object { "-$_" }
+	$exiftoolArgs += "-json"
+	$exiftoolArgs += $PhotoPath
+
+	$result = exiftool.exe @exiftoolArgs
+	$resultParsed = $result | ConvertFrom-Json -AsHashtable
+	Write-Verbose "Initial tags:`n$($resultParsed | ConvertTo-Json)"
+
+	[string[]] $missing = @()
+	[string[]] $repairs = @()
+	$relevantExifTags | ForEach-Object {
+		$curTag = $_
+
+		$curVal = $resultParsed[$curTag]
+		Write-Verbose "Photo current $curTag = $curVal"
+
+		if ($null -eq $curVal) {
+			$curTagDefaultVal = $exifTags[$curTag].DefaultVal
+			if ($null -ne $curTagDefaultVal) {
+				$repairs += "-$curTag=$curTagDefaultVal"
+				return
+			}
+
+			$curTagSameValueAs = $exifTags[$curTag].SameValueAs
+			if ($null -ne $curTagSameValueAs) {
+				for ($i = 0; $i -lt $curTagSameValueAs.Length; $i++) {
+					$otherTag = $curTagSameValueAs[$i]
+					$otherTagValue = $resultParsed[$otherTag]
+					if ($null -ne $otherTagValue) {
+						$repairs += "-$curTag=$otherTagValue"
+						return
+					}
+				}
+			}
+
+			if ($exifTags[$curTag].Required -eq $true) {
+				$missing += $curTag
+			}
+		}
+	}
+
+	Write-Verbose "repairs = $repairs"
+	if ($repairs.Length -ne 0) {
+		$repairs += $PhotoPath
+		$exiftoolSecondaryArgs = $repairs
+		if ($PSCmdlet.ShouldProcess("Apply missing default values via 'exiftool.exe $exiftoolSecondaryArgs'")) {
+			exiftool.exe @exiftoolSecondaryArgs
+		}
+	}
+
+	if ($PSCmdlet.ShouldProcess("Output updated image tags")) {
+		$result = exiftool.exe @exiftoolArgs
+		$resultParsed = $result | ConvertFrom-Json -AsHashtable
+		Write-Verbose "Final tags:`n$($resultParsed | ConvertTo-Json)"
+	}
+
+	if ($missing.Length -ne 0) {
+		throw "Missing the followed required tags: [$($missing -Join ', ')]"
+	}
+}
+
 function Start-Upload {
 	[CmdletBinding(SupportsShouldProcess)]
 	Param([Parameter(Mandatory = $true)][string] $PhotoPath)
+
+	Validate-PhotoAttributes -PhotoPath $PhotoPath
 
 	$existingUploadRef = Get-ExistingUploadRef -PhotoPath $PhotoPath
 	if ($existingUploadRef) {
@@ -269,6 +359,7 @@ function Start-Upload {
 		return $uploadRef
 	} else {
 		return @{
+			photoPath = "MOCK_PHOTO_PATH"
 			uploadUrl = "MOCK_UPLOAD_URL"
 		}
 	}
@@ -276,7 +367,7 @@ function Start-Upload {
 
 function Invoke-UploadPhoto {
 	[CmdletBinding(SupportsShouldProcess)]
-	Param([hashtable] $UploadRef)
+	Param($UploadRef)
 
 	$uploadUrl = $UploadRef.uploadUrl
 	$photoPath = $UploadRef.photoPath
@@ -296,7 +387,7 @@ function Invoke-UploadPhoto {
 
 function Invoke-CreatePhoto {
 	[CmdletBinding(SupportsShouldProcess)]
-	Param([hashtable] $UploadRef)
+	Param($UploadRef)
 
 	$body = ConvertTo-Json -Depth 10 @{ uploadReference = @{ uploadUrl = $UploadRef.uploadUrl } }
 
@@ -331,7 +422,7 @@ function Invoke-NewPhotoFlow {
 	$data.photos += $photo
 	Set-Content "$PSScriptRoot/data.json" (ConvertTo-Json -Depth 10 $data)
 
-	return $photo
+	return ($photo | ConvertTo-Json -Depth 10)
 }
 
 function Invoke-DeletePhoto {
